@@ -11,6 +11,7 @@ from src.charts.weekly_changes import create_weekly_changes_chart
 from src.charts.concentration import create_concentration_chart
 from src.charts.pct_open_interest import create_pct_oi_chart
 from src.utils.constants import REPORT_TYPES, CATEGORIES
+from src.utils.categories import build_category_map
 
 st.set_page_config(
     page_title="CFTC COT Dashboard",
@@ -72,12 +73,22 @@ def main():
         st.warning(f"No data available for {REPORT_TYPES[report_type_key]}.")
         return
 
-    # --- Sidebar: Commodity selector ---
+    # --- Sidebar: Commodity selector (two-level) ---
+    all_commodities = sorted(report_df["commodity"].unique())
+    category_map = build_category_map(all_commodities)
+    category_names = sorted(category_map.keys())
+
     with st.sidebar:
-        commodities = sorted(report_df["commodity"].unique())
+        asset_class = st.selectbox(
+            "Asset Class",
+            options=category_names,
+            index=0,
+        )
+
+        contracts_in_class = category_map.get(asset_class, [])
         commodity = st.selectbox(
-            "Commodity",
-            options=commodities,
+            "Futures Contract",
+            options=contracts_in_class,
             index=0,
         )
 
@@ -165,10 +176,17 @@ def main():
     # --- Commodity comparison ---
     st.divider()
     with st.expander("Cross-Commodity Comparison"):
+        compare_class = st.selectbox(
+            "Asset Class",
+            options=category_names,
+            index=category_names.index(asset_class) if asset_class in category_names else 0,
+            key="compare_asset_class",
+        )
+        compare_contracts = category_map.get(compare_class, [])
         compare_commodities = st.multiselect(
-            "Select commodities to compare",
-            options=commodities,
-            default=[commodity],
+            "Select futures contracts to compare",
+            options=compare_contracts,
+            default=[compare_contracts[0]] if compare_contracts else [],
             max_selections=5,
         )
 
