@@ -202,9 +202,25 @@ PCT_COLUMNS = {
     "tff": TFF_PCT,
 }
 
-# SQLite database path
+# SQLite database path — use /tmp on cloud (ephemeral but writable)
 import os
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "cot.db")
+import tempfile
+
+_project_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+_local_data_dir = os.path.join(_project_dir, "data")
+_cloud_data_dir = os.path.join(tempfile.gettempdir(), "cftc_cot")
+
+# Use local data/ dir if writable, otherwise fall back to /tmp (Streamlit Cloud)
+try:
+    os.makedirs(_local_data_dir, exist_ok=True)
+    _test_file = os.path.join(_local_data_dir, ".write_test")
+    with open(_test_file, "w") as f:
+        f.write("ok")
+    os.remove(_test_file)
+    DB_PATH = os.path.join(_local_data_dir, "cot.db")
+except OSError:
+    os.makedirs(_cloud_data_dir, exist_ok=True)
+    DB_PATH = os.path.join(_cloud_data_dir, "cot.db")
 
 # Refresh interval in days
 REFRESH_INTERVAL_DAYS = 7
