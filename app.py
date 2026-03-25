@@ -119,7 +119,11 @@ def main():
         return
 
     # --- Summary metrics ---
-    latest = filtered.sort_values("date").iloc[-1]
+    commodity_data = filtered[filtered["commodity"] == commodity]
+    if commodity_data.empty:
+        st.warning(f"No data for {commodity} in the selected date range.")
+        return
+    latest = commodity_data.sort_values("date").iloc[-1]
     categories = CATEGORIES[report_type_key]
 
     cols = st.columns(len(categories))
