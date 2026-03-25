@@ -1,0 +1,9 @@
+data/cot.db
+__pycache__/
+*.pyc
+.streamlit/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
