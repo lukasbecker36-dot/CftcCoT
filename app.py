@@ -155,22 +155,22 @@ def main():
 
     with tab1:
         fig = create_net_positioning_chart(filtered, report_type_key, commodity)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with tab2:
         show_breakdown = st.checkbox("Show category breakdown", value=True, key="oi_breakdown")
         fig = create_open_interest_chart(
             filtered, report_type_key, commodity, show_breakdown
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with tab3:
         fig = create_weekly_changes_chart(filtered, report_type_key, commodity)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with tab4:
         fig = create_concentration_chart(filtered, commodity)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with tab5:
         side = st.radio(
@@ -180,7 +180,7 @@ def main():
             key="pct_side",
         )
         fig = create_pct_oi_chart(filtered, report_type_key, commodity, side)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # --- Commodity comparison ---
     st.divider()
@@ -232,7 +232,7 @@ def main():
                 height=500,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     # --- Raw data view ---
     with st.expander("Raw Data"):
@@ -246,7 +246,7 @@ def main():
             filtered[filtered["commodity"] == commodity][display_cols]
             .sort_values("date", ascending=False)
             .reset_index(drop=True),
-            use_container_width=True,
+            width="stretch",
         )
 
 

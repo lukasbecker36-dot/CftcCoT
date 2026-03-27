@@ -1,11 +1,12 @@
 """Caching layer for CFTC COT data — supports Turso and local SQLite."""
 
 import logging
+import sqlite3
 from datetime import datetime, timedelta
 
 import pandas as pd
 
-from src.data.db import get_connection
+from src.data.db import get_connection, is_turso
 from src.data.downloader import download_report
 from src.data.parser import parse_report
 from src.utils.constants import (
@@ -18,6 +19,58 @@ logger = logging.getLogger(__name__)
 
 TABLE_NAME = "cot_data"
 META_TABLE = "metadata"
+
+# All columns in the cot_data table, in order
+COT_COLUMNS = [
+    "commodity", "cftc_code", "date", "commodity_short", "report_type",
+    "open_interest",
+    # Disaggregated
+    "prod_merc_long", "prod_merc_short",
+    "swap_long", "swap_short", "swap_spread",
+    "managed_money_long", "managed_money_short", "managed_money_spread",
+    "other_long", "other_short", "other_spread",
+    "nonreportable_long", "nonreportable_short",
+    "change_oi",
+    "change_prod_merc_long", "change_prod_merc_short",
+    "change_swap_long", "change_swap_short",
+    "change_managed_money_long", "change_managed_money_short",
+    "change_other_long", "change_other_short",
+    "pct_prod_merc_long", "pct_prod_merc_short",
+    "pct_swap_long", "pct_swap_short", "pct_swap_spread",
+    "pct_managed_money_long", "pct_managed_money_short", "pct_managed_money_spread",
+    "pct_other_long", "pct_other_short", "pct_other_spread",
+    "pct_nonreportable_long", "pct_nonreportable_short",
+    # TFF
+    "dealer_long", "dealer_short", "dealer_spread",
+    "asset_mgr_long", "asset_mgr_short", "asset_mgr_spread",
+    "lev_money_long", "lev_money_short", "lev_money_spread",
+    "change_dealer_long", "change_dealer_short",
+    "change_asset_mgr_long", "change_asset_mgr_short",
+    "change_lev_money_long", "change_lev_money_short",
+    "pct_dealer_long", "pct_dealer_short", "pct_dealer_spread",
+    "pct_asset_mgr_long", "pct_asset_mgr_short", "pct_asset_mgr_spread",
+    "pct_lev_money_long", "pct_lev_money_short", "pct_lev_money_spread",
+    # Concentration
+    "conc4_long", "conc4_short",
+    "conc8_long", "conc8_short",
+    "conc4_net_long", "conc4_net_short",
+    "conc8_net_long", "conc8_net_short",
+]
+
+
+def _query_to_dataframe(conn, sql: str, params: tuple | None = None) -> pd.DataFrame:
+    """Execute a SELECT query and return results as a DataFrame.
+
+    Works with both sqlite3 and TursoConnection.
+    """
+    if isinstance(conn, sqlite3.Connection):
+        return pd.read_sql(sql, conn, params=params)
+
+    # Turso HTTP connection
+    cursor = conn.execute(sql, params)
+    rows = cursor.fetchall()
+    columns = [desc[0] for desc in cursor.description] if cursor.description else []
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _init_meta(conn):
@@ -57,76 +110,57 @@ def _table_exists(conn, table: str) -> bool:
 
 def _init_cot_table(conn):
     """Create the cot_data table if it doesn't exist."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-            commodity TEXT,
-            cftc_code TEXT,
-            date TEXT,
-            commodity_short TEXT,
-            report_type TEXT,
-            open_interest REAL,
-            -- Disaggregated columns
-            prod_merc_long REAL, prod_merc_short REAL,
-            swap_long REAL, swap_short REAL, swap_spread REAL,
-            managed_money_long REAL, managed_money_short REAL, managed_money_spread REAL,
-            other_long REAL, other_short REAL, other_spread REAL,
-            nonreportable_long REAL, nonreportable_short REAL,
-            change_oi REAL,
-            change_prod_merc_long REAL, change_prod_merc_short REAL,
-            change_swap_long REAL, change_swap_short REAL,
-            change_managed_money_long REAL, change_managed_money_short REAL,
-            change_other_long REAL, change_other_short REAL,
-            pct_prod_merc_long REAL, pct_prod_merc_short REAL,
-            pct_swap_long REAL, pct_swap_short REAL, pct_swap_spread REAL,
-            pct_managed_money_long REAL, pct_managed_money_short REAL, pct_managed_money_spread REAL,
-            pct_other_long REAL, pct_other_short REAL, pct_other_spread REAL,
-            pct_nonreportable_long REAL, pct_nonreportable_short REAL,
-            -- TFF columns
-            dealer_long REAL, dealer_short REAL, dealer_spread REAL,
-            asset_mgr_long REAL, asset_mgr_short REAL, asset_mgr_spread REAL,
-            lev_money_long REAL, lev_money_short REAL, lev_money_spread REAL,
-            change_dealer_long REAL, change_dealer_short REAL,
-            change_asset_mgr_long REAL, change_asset_mgr_short REAL,
-            change_lev_money_long REAL, change_lev_money_short REAL,
-            pct_dealer_long REAL, pct_dealer_short REAL, pct_dealer_spread REAL,
-            pct_asset_mgr_long REAL, pct_asset_mgr_short REAL, pct_asset_mgr_spread REAL,
-            pct_lev_money_long REAL, pct_lev_money_short REAL, pct_lev_money_spread REAL,
-            -- Concentration ratios
-            conc4_long REAL, conc4_short REAL,
-            conc8_long REAL, conc8_short REAL,
-            conc4_net_long REAL, conc4_net_short REAL,
-            conc8_net_long REAL, conc8_net_short REAL
-        )
-    """)
+    col_defs = []
+    for col in COT_COLUMNS:
+        if col in ("commodity", "cftc_code", "date", "commodity_short", "report_type"):
+            col_defs.append(f"{col} TEXT")
+        else:
+            col_defs.append(f"{col} REAL")
+
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {TABLE_NAME} ({', '.join(col_defs)})"
+    )
     conn.commit()
 
 
 def _insert_dataframe(conn, df: pd.DataFrame):
-    """Insert a DataFrame into the cot_data table row by row.
-
-    Uses parameterized INSERT to work with both sqlite3 and libsql.
-    """
+    """Insert a DataFrame into the cot_data table."""
     _init_cot_table(conn)
 
-    # Get the columns that exist in both the table and the DataFrame
-    cursor = conn.execute(f"PRAGMA table_info({TABLE_NAME})")
-    table_cols = [row[1] for row in cursor.fetchall()]
-    common_cols = [c for c in table_cols if c in df.columns]
+    # Use only columns present in both the table schema and DataFrame
+    common_cols = [c for c in COT_COLUMNS if c in df.columns]
 
     placeholders = ", ".join(["?"] * len(common_cols))
     col_names = ", ".join(common_cols)
     insert_sql = f"INSERT INTO {TABLE_NAME} ({col_names}) VALUES ({placeholders})"
 
-    for _, row in df.iterrows():
-        values = [
-            str(row[c]) if pd.notna(row[c]) and c == "date" else
-            None if pd.isna(row[c]) else
-            row[c]
-            for c in common_cols
-        ]
-        conn.execute(insert_sql, values)
-
-    conn.commit()
+    if isinstance(conn, sqlite3.Connection):
+        # Use executemany for speed with local SQLite
+        rows = []
+        for _, row in df.iterrows():
+            values = tuple(
+                str(row[c]) if pd.notna(row[c]) and c == "date" else
+                None if pd.isna(row[c]) else
+                float(row[c]) if c not in ("commodity", "cftc_code", "date", "commodity_short", "report_type") and pd.notna(row[c]) else
+                row[c]
+                for c in common_cols
+            )
+            rows.append(values)
+        conn.executemany(insert_sql, rows)
+        conn.commit()
+    else:
+        # Turso HTTP — batch via executemany
+        rows = []
+        for _, row in df.iterrows():
+            values = [
+                str(row[c]) if pd.notna(row[c]) and c == "date" else
+                None if pd.isna(row[c]) else
+                float(row[c]) if c not in ("commodity", "cftc_code", "date", "commodity_short", "report_type") and pd.notna(row[c]) else
+                row[c]
+                for c in common_cols
+            ]
+            rows.append(values)
+        conn.executemany(insert_sql, rows)
 
 
 def _store_current_year(conn, report_type: str):
@@ -160,20 +194,12 @@ def needs_refresh(conn) -> bool:
 
 
 def load_initial_data(progress_callback=None) -> pd.DataFrame:
-    """Load all data, downloading if necessary.
-
-    Args:
-        progress_callback: Optional callable(message, progress_fraction)
-            for reporting progress in the UI.
-
-    Returns:
-        Combined DataFrame with all COT data.
-    """
+    """Load all data, downloading if necessary."""
     conn = get_connection()
 
     if _table_exists(conn, TABLE_NAME) and not needs_refresh(conn):
         logger.info("Loading cached data from database")
-        df = pd.read_sql(f"SELECT * FROM {TABLE_NAME}", conn)
+        df = _query_to_dataframe(conn, f"SELECT * FROM {TABLE_NAME}")
         df["date"] = pd.to_datetime(df["date"])
         conn.close()
         return df
@@ -234,7 +260,7 @@ def refresh_current_year(progress_callback=None) -> pd.DataFrame:
 
     _set_meta(conn, "last_update", datetime.now().isoformat())
 
-    df = pd.read_sql(f"SELECT * FROM {TABLE_NAME}", conn)
+    df = _query_to_dataframe(conn, f"SELECT * FROM {TABLE_NAME}")
     df["date"] = pd.to_datetime(df["date"])
     conn.close()
 

@@ -1,12 +1,17 @@
-"""Database connection layer — supports Turso (libSQL) and local SQLite.
+"""Database connection layer — supports Turso (HTTP API) and local SQLite.
 
 Uses Turso when TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are configured
 in Streamlit secrets or environment variables. Falls back to local SQLite.
+
+The Turso connection uses the HTTP pipeline API directly via requests,
+avoiding native dependencies that can't build on Streamlit Cloud.
 """
 
 import logging
 import os
 import sqlite3
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +50,134 @@ def _load_turso_config():
 _load_turso_config()
 
 
+class TursoConnection:
+    """A minimal DB-API-like connection wrapper over Turso's HTTP pipeline API."""
+
+    def __init__(self, url: str, token: str):
+        # Convert libsql:// to https://
+        self._base_url = url.replace("libsql://", "https://").rstrip("/")
+        self._api_url = f"{self._base_url}/v2/pipeline"
+        self._token = token
+        self._headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+    def execute(self, sql: str, params: tuple | list | None = None):
+        """Execute a single SQL statement and return a cursor-like object."""
+        stmt = {"type": "execute", "stmt": {"sql": sql}}
+        if params:
+            stmt["stmt"]["args"] = [
+                self._serialize_value(v) for v in params
+            ]
+
+        body = {"requests": [stmt, {"type": "close"}]}
+        resp = requests.post(
+            self._api_url, json=body, headers=self._headers, timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        results = data.get("results", [])
+        if results and results[0].get("type") == "error":
+            error = results[0]["error"]
+            raise Exception(f"Turso error: {error.get('message', error)}")
+
+        if results and results[0].get("type") == "ok":
+            return TursoCursor(results[0]["response"]["result"])
+        return TursoCursor(None)
+
+    def executemany(self, sql: str, param_list: list):
+        """Execute a SQL statement with multiple parameter sets."""
+        reqs = []
+        for params in param_list:
+            stmt = {"type": "execute", "stmt": {"sql": sql}}
+            if params:
+                stmt["stmt"]["args"] = [
+                    self._serialize_value(v) for v in params
+                ]
+            reqs.append(stmt)
+        reqs.append({"type": "close"})
+
+        # Turso has a limit on pipeline size, batch in chunks
+        chunk_size = 100
+        for i in range(0, len(reqs), chunk_size):
+            chunk = reqs[i : i + chunk_size]
+            if chunk[-1].get("type") != "close":
+                chunk.append({"type": "close"})
+            body = {"requests": chunk}
+            resp = requests.post(
+                self._api_url, json=body, headers=self._headers, timeout=60
+            )
+            resp.raise_for_status()
+
+    def commit(self):
+        """No-op — Turso auto-commits."""
+        pass
+
+    def close(self):
+        """No-op — HTTP is stateless."""
+        pass
+
+    @staticmethod
+    def _serialize_value(v):
+        """Convert a Python value to a Turso API value object."""
+        if v is None:
+            return {"type": "null", "value": None}
+        elif isinstance(v, int):
+            return {"type": "integer", "value": str(v)}
+        elif isinstance(v, float):
+            return {"type": "float", "value": v}
+        else:
+            return {"type": "text", "value": str(v)}
+
+
+class TursoCursor:
+    """Minimal cursor-like object wrapping Turso query results."""
+
+    def __init__(self, result):
+        self._rows = []
+        self._columns = []
+        if result:
+            self._columns = [c["name"] for c in result.get("cols", [])]
+            for row in result.get("rows", []):
+                self._rows.append(
+                    tuple(self._deserialize_value(v) for v in row)
+                )
+
+    def fetchone(self):
+        if self._rows:
+            return self._rows[0]
+        return None
+
+    def fetchall(self):
+        return self._rows
+
+    @property
+    def description(self):
+        """Return column descriptions (name only, rest None)."""
+        return [(c, None, None, None, None, None, None) for c in self._columns]
+
+    @staticmethod
+    def _deserialize_value(v):
+        """Convert a Turso API value to a Python value."""
+        if v.get("type") == "null":
+            return None
+        elif v.get("type") == "integer":
+            return int(v["value"])
+        elif v.get("type") == "float":
+            return float(v["value"])
+        else:
+            return v.get("value")
+
+
 def get_connection():
     """Get a database connection (Turso or local SQLite).
 
-    Returns a dbapi2-compatible connection object.
+    Returns a connection object with execute/commit/close methods.
     """
     if _USE_TURSO:
-        import libsql_experimental as libsql
-        return libsql.connect(
-            database=_TURSO_URL,
-            auth_token=_TURSO_TOKEN,
-        )
+        return TursoConnection(_TURSO_URL, _TURSO_TOKEN)
     else:
         from src.utils.constants import DB_PATH
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
