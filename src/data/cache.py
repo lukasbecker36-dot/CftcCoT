@@ -1,19 +1,16 @@
-"""SQLite caching layer for CFTC COT data."""
+"""Caching layer for CFTC COT data — supports Turso and local SQLite."""
 
 import logging
-import os
-import sqlite3
 from datetime import datetime, timedelta
 
 import pandas as pd
 
-from src.data.downloader import download_all_reports, download_report
+from src.data.db import get_connection
+from src.data.downloader import download_report
 from src.data.parser import parse_report
 from src.utils.constants import (
     CURRENT_YEAR,
-    DB_PATH,
     REFRESH_INTERVAL_DAYS,
-    START_YEAR,
     YEARS,
 )
 
@@ -23,16 +20,7 @@ TABLE_NAME = "cot_data"
 META_TABLE = "metadata"
 
 
-def _ensure_db_dir():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-
-def _get_conn() -> sqlite3.Connection:
-    _ensure_db_dir()
-    return sqlite3.connect(DB_PATH)
-
-
-def _init_meta(conn: sqlite3.Connection):
+def _init_meta(conn):
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS {META_TABLE} ("
         "  key TEXT PRIMARY KEY,"
@@ -42,7 +30,7 @@ def _init_meta(conn: sqlite3.Connection):
     conn.commit()
 
 
-def _get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+def _get_meta(conn, key: str) -> str | None:
     _init_meta(conn)
     row = conn.execute(
         f"SELECT value FROM {META_TABLE} WHERE key = ?", (key,)
@@ -50,7 +38,7 @@ def _get_meta(conn: sqlite3.Connection, key: str) -> str | None:
     return row[0] if row else None
 
 
-def _set_meta(conn: sqlite3.Connection, key: str, value: str):
+def _set_meta(conn, key: str, value: str):
     _init_meta(conn)
     conn.execute(
         f"INSERT OR REPLACE INTO {META_TABLE} (key, value) VALUES (?, ?)",
@@ -59,7 +47,7 @@ def _set_meta(conn: sqlite3.Connection, key: str, value: str):
     conn.commit()
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+def _table_exists(conn, table: str) -> bool:
     row = conn.execute(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
         (table,),
@@ -67,19 +55,81 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row[0] > 0
 
 
-def _store_data(conn: sqlite3.Connection, df: pd.DataFrame, report_type: str):
-    """Store parsed data in SQLite, replacing data for the given report type."""
-    # Delete existing data for this report type
-    if _table_exists(conn, TABLE_NAME):
-        conn.execute(
-            f"DELETE FROM {TABLE_NAME} WHERE report_type = ?", (report_type,)
+def _init_cot_table(conn):
+    """Create the cot_data table if it doesn't exist."""
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            commodity TEXT,
+            cftc_code TEXT,
+            date TEXT,
+            commodity_short TEXT,
+            report_type TEXT,
+            open_interest REAL,
+            -- Disaggregated columns
+            prod_merc_long REAL, prod_merc_short REAL,
+            swap_long REAL, swap_short REAL, swap_spread REAL,
+            managed_money_long REAL, managed_money_short REAL, managed_money_spread REAL,
+            other_long REAL, other_short REAL, other_spread REAL,
+            nonreportable_long REAL, nonreportable_short REAL,
+            change_oi REAL,
+            change_prod_merc_long REAL, change_prod_merc_short REAL,
+            change_swap_long REAL, change_swap_short REAL,
+            change_managed_money_long REAL, change_managed_money_short REAL,
+            change_other_long REAL, change_other_short REAL,
+            pct_prod_merc_long REAL, pct_prod_merc_short REAL,
+            pct_swap_long REAL, pct_swap_short REAL, pct_swap_spread REAL,
+            pct_managed_money_long REAL, pct_managed_money_short REAL, pct_managed_money_spread REAL,
+            pct_other_long REAL, pct_other_short REAL, pct_other_spread REAL,
+            pct_nonreportable_long REAL, pct_nonreportable_short REAL,
+            -- TFF columns
+            dealer_long REAL, dealer_short REAL, dealer_spread REAL,
+            asset_mgr_long REAL, asset_mgr_short REAL, asset_mgr_spread REAL,
+            lev_money_long REAL, lev_money_short REAL, lev_money_spread REAL,
+            change_dealer_long REAL, change_dealer_short REAL,
+            change_asset_mgr_long REAL, change_asset_mgr_short REAL,
+            change_lev_money_long REAL, change_lev_money_short REAL,
+            pct_dealer_long REAL, pct_dealer_short REAL, pct_dealer_spread REAL,
+            pct_asset_mgr_long REAL, pct_asset_mgr_short REAL, pct_asset_mgr_spread REAL,
+            pct_lev_money_long REAL, pct_lev_money_short REAL, pct_lev_money_spread REAL,
+            -- Concentration ratios
+            conc4_long REAL, conc4_short REAL,
+            conc8_long REAL, conc8_short REAL,
+            conc4_net_long REAL, conc4_net_short REAL,
+            conc8_net_long REAL, conc8_net_short REAL
         )
-
-    df.to_sql(TABLE_NAME, conn, if_exists="append", index=False)
+    """)
     conn.commit()
 
 
-def _store_current_year(conn: sqlite3.Connection, report_type: str):
+def _insert_dataframe(conn, df: pd.DataFrame):
+    """Insert a DataFrame into the cot_data table row by row.
+
+    Uses parameterized INSERT to work with both sqlite3 and libsql.
+    """
+    _init_cot_table(conn)
+
+    # Get the columns that exist in both the table and the DataFrame
+    cursor = conn.execute(f"PRAGMA table_info({TABLE_NAME})")
+    table_cols = [row[1] for row in cursor.fetchall()]
+    common_cols = [c for c in table_cols if c in df.columns]
+
+    placeholders = ", ".join(["?"] * len(common_cols))
+    col_names = ", ".join(common_cols)
+    insert_sql = f"INSERT INTO {TABLE_NAME} ({col_names}) VALUES ({placeholders})"
+
+    for _, row in df.iterrows():
+        values = [
+            str(row[c]) if pd.notna(row[c]) and c == "date" else
+            None if pd.isna(row[c]) else
+            row[c]
+            for c in common_cols
+        ]
+        conn.execute(insert_sql, values)
+
+    conn.commit()
+
+
+def _store_current_year(conn, report_type: str):
     """Download and store only the current year's data for a report type."""
     raw = download_report(report_type, CURRENT_YEAR)
     if raw is None:
@@ -95,12 +145,12 @@ def _store_current_year(conn: sqlite3.Connection, report_type: str):
             f"DELETE FROM {TABLE_NAME} WHERE report_type = ? AND date >= ?",
             (report_type, year_start),
         )
+        conn.commit()
 
-    parsed.to_sql(TABLE_NAME, conn, if_exists="append", index=False)
-    conn.commit()
+    _insert_dataframe(conn, parsed)
 
 
-def needs_refresh(conn: sqlite3.Connection) -> bool:
+def needs_refresh(conn) -> bool:
     """Check if data needs to be refreshed (older than REFRESH_INTERVAL_DAYS)."""
     last_update = _get_meta(conn, "last_update")
     if last_update is None:
@@ -119,10 +169,10 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
     Returns:
         Combined DataFrame with all COT data.
     """
-    conn = _get_conn()
+    conn = get_connection()
 
     if _table_exists(conn, TABLE_NAME) and not needs_refresh(conn):
-        logger.info("Loading cached data from SQLite")
+        logger.info("Loading cached data from database")
         df = pd.read_sql(f"SELECT * FROM {TABLE_NAME}", conn)
         df["date"] = pd.to_datetime(df["date"])
         conn.close()
@@ -155,13 +205,13 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
 
     combined = pd.concat(all_frames, ignore_index=True)
 
-    # Store everything
+    # Clear existing data and insert fresh
     if _table_exists(conn, TABLE_NAME):
-        conn.execute(f"DROP TABLE {TABLE_NAME}")
-    combined.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
+        conn.execute(f"DELETE FROM {TABLE_NAME}")
+        conn.commit()
+    _insert_dataframe(conn, combined)
 
     _set_meta(conn, "last_update", datetime.now().isoformat())
-    conn.commit()
 
     if progress_callback:
         progress_callback("Data loaded!", 1.0)
@@ -172,7 +222,7 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
 
 def refresh_current_year(progress_callback=None) -> pd.DataFrame:
     """Refresh only the current year's data and return the full dataset."""
-    conn = _get_conn()
+    conn = get_connection()
 
     for i, report_type in enumerate(["disaggregated", "tff"]):
         if progress_callback:
@@ -196,7 +246,10 @@ def refresh_current_year(progress_callback=None) -> pd.DataFrame:
 
 def get_last_update() -> str | None:
     """Return the last update timestamp, or None."""
-    conn = _get_conn()
-    val = _get_meta(conn, "last_update")
+    conn = get_connection()
+    try:
+        val = _get_meta(conn, "last_update")
+    except Exception:
+        val = None
     conn.close()
     return val
