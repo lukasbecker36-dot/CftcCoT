@@ -74,7 +74,12 @@ def main():
         return
 
     # --- Sidebar: Commodity selector (two-level) ---
-    all_commodities = sorted(report_df["commodity"].unique())
+    # Only include contracts that have data in the last 12 months
+    cutoff_date = report_df["date"].max() - timedelta(days=365)
+    active_commodities = (
+        report_df[report_df["date"] >= cutoff_date]["commodity"].unique()
+    )
+    all_commodities = sorted(active_commodities)
     category_map = build_category_map(all_commodities)
     category_names = sorted(category_map.keys())
 
