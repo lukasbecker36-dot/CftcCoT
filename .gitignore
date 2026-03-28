@@ -1,4 +1,5 @@
 data/cot.db
+# Keep CSV dumps but ignore the SQLite database
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
