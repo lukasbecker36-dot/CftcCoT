@@ -15,14 +15,22 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+_config_loaded = False
 _USE_TURSO = False
 _TURSO_URL = None
 _TURSO_TOKEN = None
 
 
-def _load_turso_config():
-    """Load Turso config from Streamlit secrets or environment variables."""
-    global _USE_TURSO, _TURSO_URL, _TURSO_TOKEN
+def _ensure_config():
+    """Load Turso config lazily on first use (not at import time).
+
+    Streamlit secrets are only available after the Streamlit runtime
+    initializes, so we defer config loading until get_connection() is called.
+    """
+    global _config_loaded, _USE_TURSO, _TURSO_URL, _TURSO_TOKEN
+
+    if _config_loaded:
+        return
 
     # Try Streamlit secrets first
     try:
@@ -39,15 +47,12 @@ def _load_turso_config():
         _TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
     _USE_TURSO = bool(_TURSO_URL and _TURSO_TOKEN)
+    _config_loaded = True
 
     if _USE_TURSO:
         logger.info("Using Turso database: %s", _TURSO_URL)
     else:
         logger.info("Turso not configured — using local SQLite")
-
-
-# Load config on import
-_load_turso_config()
 
 
 class TursoConnection:
@@ -176,6 +181,7 @@ def get_connection():
 
     Returns a connection object with execute/commit/close methods.
     """
+    _ensure_config()
     if _USE_TURSO:
         return TursoConnection(_TURSO_URL, _TURSO_TOKEN)
     else:
@@ -186,4 +192,5 @@ def get_connection():
 
 def is_turso() -> bool:
     """Return True if using Turso, False if local SQLite."""
+    _ensure_config()
     return _USE_TURSO

@@ -57,7 +57,7 @@ def main():
             st.caption("No cached data yet")
 
     # --- Load data ---
-    with st.spinner("Loading COT data (first run downloads from CFTC)..."):
+    with st.spinner("Loading COT data..."):
         df = get_data()
 
     if df.empty:
