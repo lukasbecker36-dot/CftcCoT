@@ -252,18 +252,24 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
     conn = get_connection()
 
     table_exists = _table_exists(conn, TABLE_NAME)
-    refresh_needed = needs_refresh(conn) if table_exists else True
-    print(f"[CACHE] table_exists={table_exists}, refresh_needed={refresh_needed}", flush=True)
+    print(f"[CACHE] table_exists={table_exists}", flush=True)
 
-    if table_exists and not refresh_needed:
-        print("[CACHE] Loading from database...", flush=True)
-        df = _query_to_dataframe(conn, f"SELECT * FROM {TABLE_NAME}")
-        print(f"[CACHE] Loaded {len(df)} rows from database", flush=True)
-        df["date"] = pd.to_datetime(df["date"])
-        conn.close()
-        return df
+    # If data exists in the database, ALWAYS load it first (fast path)
+    if table_exists:
+        # Check row count to confirm there's actual data
+        cursor = conn.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
+        row_count = cursor.fetchone()[0]
+        print(f"[CACHE] Row count: {row_count}", flush=True)
 
-    print("[CACHE] Full download from CFTC needed", flush=True)
+        if row_count > 0:
+            print("[CACHE] Loading from database...", flush=True)
+            df = _query_to_dataframe(conn, f"SELECT * FROM {TABLE_NAME}")
+            print(f"[CACHE] Loaded {len(df)} rows from database", flush=True)
+            df["date"] = pd.to_datetime(df["date"])
+            conn.close()
+            return df
+
+    print("[CACHE] No data in database — full download from CFTC needed", flush=True)
     # Full download needed
     report_types = ["disaggregated", "tff"]
     total_steps = len(report_types) * len(YEARS)
