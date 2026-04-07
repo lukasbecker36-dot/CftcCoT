@@ -35,24 +35,32 @@ def _ensure_config():
     # Try Streamlit secrets first
     try:
         import streamlit as st
-        _TURSO_URL = st.secrets.get("TURSO_DATABASE_URL")
-        _TURSO_TOKEN = st.secrets.get("TURSO_AUTH_TOKEN")
-    except Exception:
-        pass
+        secrets = st.secrets
+        print(f"[DB] Streamlit secrets available. Keys: {list(secrets.keys())}")
+        if "TURSO_DATABASE_URL" in secrets:
+            _TURSO_URL = secrets["TURSO_DATABASE_URL"]
+        if "TURSO_AUTH_TOKEN" in secrets:
+            _TURSO_TOKEN = secrets["TURSO_AUTH_TOKEN"]
+    except Exception as e:
+        print(f"[DB] Failed to read Streamlit secrets: {type(e).__name__}: {e}")
 
     # Fall back to environment variables
     if not _TURSO_URL:
         _TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
+        if _TURSO_URL:
+            print("[DB] Got TURSO_DATABASE_URL from environment")
     if not _TURSO_TOKEN:
         _TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
+        if _TURSO_TOKEN:
+            print("[DB] Got TURSO_AUTH_TOKEN from environment")
 
     _USE_TURSO = bool(_TURSO_URL and _TURSO_TOKEN)
     _config_loaded = True
 
     if _USE_TURSO:
-        logger.info("Using Turso database: %s", _TURSO_URL)
+        print(f"[DB] Using Turso database: {_TURSO_URL}")
     else:
-        logger.info("Turso not configured — using local SQLite")
+        print(f"[DB] Turso NOT configured — using local SQLite. URL={bool(_TURSO_URL)}, Token={bool(_TURSO_TOKEN)}")
 
 
 class TursoConnection:
