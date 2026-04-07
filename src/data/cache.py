@@ -1,6 +1,7 @@
 """Caching layer for CFTC COT data — supports Turso and local SQLite."""
 
 import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -255,21 +256,76 @@ def needs_refresh(conn) -> bool:
     return True
 
 
+def _find_csv_dir() -> str | None:
+    """Find the directory containing seed CSV files."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data"),
+        "/mount/src/cftccot/data",  # Streamlit Cloud path
+    ]
+    for d in candidates:
+        if os.path.isfile(os.path.join(d, "cot_disaggregated.csv")):
+            return d
+    return None
+
+
+def _seed_from_csvs(conn) -> pd.DataFrame | None:
+    """Seed database from committed CSV files (much faster than CFTC download)."""
+    csv_dir = _find_csv_dir()
+    if csv_dir is None:
+        print("[CACHE] No seed CSV files found", flush=True)
+        return None
+
+    print(f"[CACHE] Seeding from CSV files in {csv_dir}", flush=True)
+    frames = []
+    for filename, report_type in [
+        ("cot_disaggregated.csv", "disaggregated"),
+        ("cot_tff.csv", "tff"),
+    ]:
+        path = os.path.join(csv_dir, filename)
+        if not os.path.isfile(path):
+            print(f"[CACHE] Missing {filename}, skipping", flush=True)
+            continue
+        print(f"[CACHE] Reading {filename}...", flush=True)
+        df = pd.read_csv(path)
+        print(f"[CACHE] Read {len(df)} rows from {filename}", flush=True)
+        frames.append(df)
+
+    if not frames:
+        return None
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["date"] = pd.to_datetime(combined["date"])
+
+    # Clear and re-insert
+    if _table_exists(conn, TABLE_NAME):
+        conn.execute(f"DELETE FROM {TABLE_NAME}")
+        conn.commit()
+    print(f"[CACHE] Inserting {len(combined)} rows into database...", flush=True)
+    _insert_dataframe(conn, combined)
+    _set_meta(conn, "last_update", datetime.now().isoformat())
+    print("[CACHE] Seeding complete", flush=True)
+
+    return combined
+
+
+# Minimum expected row count — if DB has fewer, it's incomplete and needs reseeding
+_MIN_EXPECTED_ROWS = 50000
+
+
 def load_initial_data(progress_callback=None) -> pd.DataFrame:
-    """Load all data, downloading if necessary."""
+    """Load all data, seeding from CSVs or downloading if necessary."""
     conn = get_connection()
 
     table_exists = _table_exists(conn, TABLE_NAME)
     print(f"[CACHE] table_exists={table_exists}", flush=True)
 
-    # If data exists in the database, ALWAYS load it first (fast path)
     if table_exists:
-        # Check row count to confirm there's actual data
         cursor = conn.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
         row_count = cursor.fetchone()[0]
         print(f"[CACHE] Row count: {row_count}", flush=True)
 
-        if row_count > 0:
+        if row_count >= _MIN_EXPECTED_ROWS:
+            # Database has enough data — load it
             print("[CACHE] Loading from database...", flush=True)
             df = _query_to_dataframe(
                 conn, f"SELECT * FROM {TABLE_NAME} ORDER BY rowid"
@@ -281,9 +337,17 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
             df["date"] = pd.to_datetime(df["date"])
             conn.close()
             return df
+        else:
+            print(f"[CACHE] Database incomplete ({row_count} < {_MIN_EXPECTED_ROWS}), reseeding...", flush=True)
 
-    print("[CACHE] No data in database — full download from CFTC needed", flush=True)
-    # Full download needed
+    # Database missing or incomplete — try seeding from CSVs first
+    df = _seed_from_csvs(conn)
+    if df is not None:
+        conn.close()
+        return df
+
+    # No CSVs available — fall back to CFTC download
+    print("[CACHE] No CSV seed files — downloading from CFTC...", flush=True)
     report_types = ["disaggregated", "tff"]
     total_steps = len(report_types) * len(YEARS)
     current_step = 0
