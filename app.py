@@ -43,10 +43,9 @@ def main():
 
         # Refresh button
         if st.button("Refresh Data (Current Year)"):
-            with st.spinner("Refreshing..."):
-                df = refresh_current_year()
-                st.cache_data.clear()
-            st.success("Data refreshed!")
+            st.cache_data.clear()
+            with st.spinner("Refreshing current year data..."):
+                refresh_current_year()
             st.rerun()
 
         # Last updated

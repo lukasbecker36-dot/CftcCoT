@@ -58,7 +58,7 @@ COT_COLUMNS = [
 ]
 
 
-TURSO_BATCH_SIZE = 5000
+TURSO_BATCH_SIZE = 2000
 
 
 def _query_to_dataframe(conn, sql: str, params: tuple | None = None) -> pd.DataFrame:
@@ -77,18 +77,26 @@ def _query_to_dataframe(conn, sql: str, params: tuple | None = None) -> pd.DataF
         frames = []
         offset = 0
         columns = None
+        batch_num = 0
         while True:
             paged_sql = f"{sql} LIMIT {TURSO_BATCH_SIZE} OFFSET {offset}"
-            cursor = conn.execute(paged_sql, params)
-            rows = cursor.fetchall()
+            try:
+                cursor = conn.execute(paged_sql, params)
+                rows = cursor.fetchall()
+            except Exception as e:
+                print(f"[QUERY] Batch {batch_num} failed at offset {offset}: {e}", flush=True)
+                break
             if columns is None and cursor.description:
                 columns = [desc[0] for desc in cursor.description]
             if not rows:
+                print(f"[QUERY] Batch {batch_num}: 0 rows (done)", flush=True)
                 break
             frames.append(pd.DataFrame(rows, columns=columns))
+            print(f"[QUERY] Batch {batch_num}: {len(rows)} rows (total so far: {sum(len(f) for f in frames)})", flush=True)
             if len(rows) < TURSO_BATCH_SIZE:
                 break
             offset += TURSO_BATCH_SIZE
+            batch_num += 1
 
         if not frames:
             return pd.DataFrame()
