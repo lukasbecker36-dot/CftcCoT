@@ -214,11 +214,28 @@ def _store_current_year(conn, report_type: str):
 
 def needs_refresh(conn) -> bool:
     """Check if data needs to be refreshed (older than REFRESH_INTERVAL_DAYS)."""
+    # First check metadata table
     last_update = _get_meta(conn, "last_update")
-    if last_update is None:
-        return True
-    last_dt = datetime.fromisoformat(last_update)
-    return datetime.now() - last_dt > timedelta(days=REFRESH_INTERVAL_DAYS)
+    if last_update is not None:
+        last_dt = datetime.fromisoformat(last_update)
+        return datetime.now() - last_dt > timedelta(days=REFRESH_INTERVAL_DAYS)
+
+    # Metadata missing — check the actual data for the most recent date
+    try:
+        cursor = conn.execute(f"SELECT MAX(date) FROM {TABLE_NAME}")
+        row = cursor.fetchone()
+        if row and row[0]:
+            max_date = datetime.fromisoformat(str(row[0])[:19])
+            age = datetime.now() - max_date
+            print(f"[CACHE] No metadata, latest data date: {max_date}, age: {age.days}d", flush=True)
+            if age < timedelta(days=REFRESH_INTERVAL_DAYS + 3):
+                # Data is recent enough — set metadata so next check is fast
+                _set_meta(conn, "last_update", datetime.now().isoformat())
+                return False
+    except Exception as e:
+        print(f"[CACHE] Error checking max date: {e}", flush=True)
+
+    return True
 
 
 def load_initial_data(progress_callback=None) -> pd.DataFrame:
