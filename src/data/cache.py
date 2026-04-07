@@ -225,13 +225,19 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
     """Load all data, downloading if necessary."""
     conn = get_connection()
 
-    if _table_exists(conn, TABLE_NAME) and not needs_refresh(conn):
-        logger.info("Loading cached data from database")
+    table_exists = _table_exists(conn, TABLE_NAME)
+    refresh_needed = needs_refresh(conn) if table_exists else True
+    print(f"[CACHE] table_exists={table_exists}, refresh_needed={refresh_needed}", flush=True)
+
+    if table_exists and not refresh_needed:
+        print("[CACHE] Loading from database...", flush=True)
         df = _query_to_dataframe(conn, f"SELECT * FROM {TABLE_NAME}")
+        print(f"[CACHE] Loaded {len(df)} rows from database", flush=True)
         df["date"] = pd.to_datetime(df["date"])
         conn.close()
         return df
 
+    print("[CACHE] Full download from CFTC needed", flush=True)
     # Full download needed
     report_types = ["disaggregated", "tff"]
     total_steps = len(report_types) * len(YEARS)
