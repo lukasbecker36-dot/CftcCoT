@@ -213,23 +213,32 @@ def _store_current_year(conn, report_type: str):
 
 
 def needs_refresh(conn) -> bool:
-    """Check if data needs to be refreshed (older than REFRESH_INTERVAL_DAYS)."""
-    # First check metadata table
+    """Check if data needs to be refreshed.
+
+    Only triggers a full re-download if the most recent data point in the
+    database is older than REFRESH_INTERVAL_DAYS. The metadata last_update
+    is used as a fast-path cache; if missing or stale, we check the data.
+    """
+    # Fast path: check metadata
     last_update = _get_meta(conn, "last_update")
+    print(f"[CACHE] last_update metadata = {last_update}", flush=True)
     if last_update is not None:
         last_dt = datetime.fromisoformat(last_update)
-        return datetime.now() - last_dt > timedelta(days=REFRESH_INTERVAL_DAYS)
+        age = datetime.now() - last_dt
+        if age <= timedelta(days=REFRESH_INTERVAL_DAYS):
+            return False
 
-    # Metadata missing — check the actual data for the most recent date
+    # Metadata missing or stale — check actual data dates
     try:
         cursor = conn.execute(f"SELECT MAX(date) FROM {TABLE_NAME}")
         row = cursor.fetchone()
         if row and row[0]:
             max_date = datetime.fromisoformat(str(row[0])[:19])
-            age = datetime.now() - max_date
-            print(f"[CACHE] No metadata, latest data date: {max_date}, age: {age.days}d", flush=True)
-            if age < timedelta(days=REFRESH_INTERVAL_DAYS + 3):
-                # Data is recent enough — set metadata so next check is fast
+            data_age = datetime.now() - max_date
+            print(f"[CACHE] Latest data date: {max_date}, age: {data_age.days}d", flush=True)
+            # COT data is weekly (released Fridays), so up to ~14 days old is normal
+            if data_age < timedelta(days=14):
+                # Data is fresh enough — update metadata timestamp
                 _set_meta(conn, "last_update", datetime.now().isoformat())
                 return False
     except Exception as e:
