@@ -263,8 +263,13 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
 
         if row_count > 0:
             print("[CACHE] Loading from database...", flush=True)
-            df = _query_to_dataframe(conn, f"SELECT * FROM {TABLE_NAME}")
+            df = _query_to_dataframe(
+                conn, f"SELECT * FROM {TABLE_NAME} ORDER BY rowid"
+            )
             print(f"[CACHE] Loaded {len(df)} rows from database", flush=True)
+            if len(df) > 0:
+                rt_counts = df["report_type"].value_counts().to_dict()
+                print(f"[CACHE] Report types: {rt_counts}", flush=True)
             df["date"] = pd.to_datetime(df["date"])
             conn.close()
             return df
@@ -326,7 +331,7 @@ def refresh_current_year(progress_callback=None) -> pd.DataFrame:
 
     _set_meta(conn, "last_update", datetime.now().isoformat())
 
-    df = _query_to_dataframe(conn, f"SELECT * FROM {TABLE_NAME}")
+    df = _query_to_dataframe(conn, f"SELECT * FROM {TABLE_NAME} ORDER BY rowid")
     df["date"] = pd.to_datetime(df["date"])
     conn.close()
 
