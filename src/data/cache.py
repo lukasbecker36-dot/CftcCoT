@@ -58,15 +58,43 @@ COT_COLUMNS = [
 ]
 
 
+TURSO_BATCH_SIZE = 5000
+
+
 def _query_to_dataframe(conn, sql: str, params: tuple | None = None) -> pd.DataFrame:
     """Execute a SELECT query and return results as a DataFrame.
 
     Works with both sqlite3 and TursoConnection.
+    For Turso, paginates large queries to avoid HTTP timeouts.
     """
     if isinstance(conn, sqlite3.Connection):
         return pd.read_sql(sql, conn, params=params)
 
-    # Turso HTTP connection
+    # Turso HTTP connection — paginate to avoid timeouts on large tables
+    # Check if this is a simple SELECT * that can be paginated
+    sql_upper = sql.strip().upper()
+    if "LIMIT" not in sql_upper and "SELECT" in sql_upper:
+        frames = []
+        offset = 0
+        columns = None
+        while True:
+            paged_sql = f"{sql} LIMIT {TURSO_BATCH_SIZE} OFFSET {offset}"
+            cursor = conn.execute(paged_sql, params)
+            rows = cursor.fetchall()
+            if columns is None and cursor.description:
+                columns = [desc[0] for desc in cursor.description]
+            if not rows:
+                break
+            frames.append(pd.DataFrame(rows, columns=columns))
+            if len(rows) < TURSO_BATCH_SIZE:
+                break
+            offset += TURSO_BATCH_SIZE
+
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    # Non-paginated query
     cursor = conn.execute(sql, params)
     rows = cursor.fetchall()
     columns = [desc[0] for desc in cursor.description] if cursor.description else []

@@ -78,7 +78,7 @@ class TursoConnection:
 
         body = {"requests": [stmt, {"type": "close"}]}
         resp = requests.post(
-            self._api_url, json=body, headers=self._headers, timeout=30
+            self._api_url, json=body, headers=self._headers, timeout=120
         )
         resp.raise_for_status()
         data = resp.json()
