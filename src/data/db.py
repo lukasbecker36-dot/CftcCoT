@@ -36,13 +36,15 @@ def _ensure_config():
     try:
         import streamlit as st
         secrets = st.secrets
-        print(f"[DB] Streamlit secrets available. Keys: {list(secrets.keys())}")
+        print(f"[DB] Streamlit secrets available. Keys: {list(secrets.keys())}", flush=True)
         if "TURSO_DATABASE_URL" in secrets:
             _TURSO_URL = secrets["TURSO_DATABASE_URL"]
+            print(f"[DB] Got URL from secrets: {_TURSO_URL[:30]}...", flush=True)
         if "TURSO_AUTH_TOKEN" in secrets:
             _TURSO_TOKEN = secrets["TURSO_AUTH_TOKEN"]
+            print("[DB] Got token from secrets", flush=True)
     except Exception as e:
-        print(f"[DB] Failed to read Streamlit secrets: {type(e).__name__}: {e}")
+        print(f"[DB] Failed to read Streamlit secrets: {type(e).__name__}: {e}", flush=True)
 
     # Fall back to environment variables
     if not _TURSO_URL:

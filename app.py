@@ -57,6 +57,13 @@ def main():
             st.caption("No cached data yet")
 
     # --- Load data ---
+    from src.data.db import is_turso, _ensure_config
+    _ensure_config()
+    if is_turso():
+        st.sidebar.success("Connected to Turso")
+    else:
+        st.sidebar.warning("Using local SQLite (Turso not configured)")
+
     with st.spinner("Loading COT data..."):
         df = get_data()
 
