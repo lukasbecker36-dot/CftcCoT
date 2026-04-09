@@ -46,6 +46,7 @@ def main():
             "Report Type",
             options=list(REPORT_TYPES.keys()),
             format_func=lambda x: REPORT_TYPES[x],
+            index=1,  # Default to Traders in Financial Futures
         )
 
         # Refresh button
