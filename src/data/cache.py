@@ -311,9 +311,40 @@ def _seed_from_csvs(conn) -> pd.DataFrame | None:
 # Minimum expected row count — if DB has fewer, it's incomplete and needs reseeding
 _MIN_EXPECTED_ROWS = 50000
 
+# Max age of data before auto-refresh on cold start (COT releases are weekly)
+_STALENESS_DAYS = 8
+
+
+def _get_data_max_date(conn) -> datetime | None:
+    """Return the latest date in the cot_data table, or None."""
+    try:
+        cursor = conn.execute(f"SELECT MAX(date) FROM {TABLE_NAME}")
+        row = cursor.fetchone()
+        if row and row[0]:
+            return datetime.fromisoformat(str(row[0])[:19])
+    except Exception as e:
+        print(f"[CACHE] Error checking max date: {e}", flush=True)
+    return None
+
+
+def _refresh_current_year_inline(conn) -> None:
+    """Download and store current year data from CFTC. Silent on failure."""
+    for report_type in ["disaggregated", "tff"]:
+        try:
+            print(f"[CACHE] Refreshing {report_type} {CURRENT_YEAR} from CFTC...", flush=True)
+            _store_current_year(conn, report_type)
+            print(f"[CACHE] Refreshed {report_type} {CURRENT_YEAR}", flush=True)
+        except Exception as e:
+            print(f"[CACHE] Failed to refresh {report_type}: {e}", flush=True)
+
+    _set_meta(conn, "last_update", datetime.now().isoformat())
+
 
 def load_initial_data(progress_callback=None) -> pd.DataFrame:
-    """Load all data, seeding from CSVs or downloading if necessary."""
+    """Load all data, seeding from CSVs or downloading if necessary.
+
+    Auto-refreshes current year from CFTC if data is older than _STALENESS_DAYS.
+    """
     conn = get_connection()
 
     table_exists = _table_exists(conn, TABLE_NAME)
@@ -325,7 +356,16 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
         print(f"[CACHE] Row count: {row_count}", flush=True)
 
         if row_count >= _MIN_EXPECTED_ROWS:
-            # Database has enough data — load it
+            # Database has enough data — check freshness
+            max_date = _get_data_max_date(conn)
+            if max_date:
+                age_days = (datetime.now() - max_date).days
+                print(f"[CACHE] Latest data: {max_date.date()}, age: {age_days}d", flush=True)
+                if age_days > _STALENESS_DAYS:
+                    print(f"[CACHE] Data is stale (>{_STALENESS_DAYS}d), refreshing current year...", flush=True)
+                    _refresh_current_year_inline(conn)
+
+            # Load the (possibly refreshed) data
             print("[CACHE] Loading from database...", flush=True)
             df = _query_to_dataframe(
                 conn, f"SELECT * FROM {TABLE_NAME} ORDER BY rowid"
@@ -334,6 +374,7 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
             if len(df) > 0:
                 rt_counts = df["report_type"].value_counts().to_dict()
                 print(f"[CACHE] Report types: {rt_counts}", flush=True)
+                print(f"[CACHE] Date range: {df['date'].min()} to {df['date'].max()}", flush=True)
             df["date"] = pd.to_datetime(df["date"])
             conn.close()
             return df
@@ -343,6 +384,23 @@ def load_initial_data(progress_callback=None) -> pd.DataFrame:
     # Database missing or incomplete — try seeding from CSVs first
     df = _seed_from_csvs(conn)
     if df is not None:
+        # CSVs are static — refresh current year to pick up weekly updates
+        max_date = _get_data_max_date(conn)
+        needs_refresh_after_seed = True
+        if max_date:
+            age_days = (datetime.now() - max_date).days
+            print(f"[CACHE] Post-seed latest data: {max_date.date()}, age: {age_days}d", flush=True)
+            needs_refresh_after_seed = age_days > _STALENESS_DAYS
+
+        if needs_refresh_after_seed:
+            print("[CACHE] Refreshing current year after seeding...", flush=True)
+            _refresh_current_year_inline(conn)
+            # Reload after refresh
+            df = _query_to_dataframe(
+                conn, f"SELECT * FROM {TABLE_NAME} ORDER BY rowid"
+            )
+            df["date"] = pd.to_datetime(df["date"])
+
         conn.close()
         return df
 

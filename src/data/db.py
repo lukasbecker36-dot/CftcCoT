@@ -115,14 +115,14 @@ class TursoConnection:
         reqs.append({"type": "close"})
 
         # Turso has a limit on pipeline size, batch in chunks
-        chunk_size = 100
+        chunk_size = 500
         for i in range(0, len(reqs), chunk_size):
             chunk = reqs[i : i + chunk_size]
             if chunk[-1].get("type") != "close":
                 chunk.append({"type": "close"})
             body = {"requests": chunk}
             resp = requests.post(
-                self._api_url, json=body, headers=self._headers, timeout=60
+                self._api_url, json=body, headers=self._headers, timeout=120
             )
             resp.raise_for_status()
 
